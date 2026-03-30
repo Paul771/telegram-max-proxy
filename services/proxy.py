@@ -1,8 +1,8 @@
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from adapters.telegram import TelegramClient
 from adapters.max import MaxClient
 from models.telegram import TelegramMessage, TelegramUpdate
-from models.max import MaxMessage, MaxResponse
+from models.max import MaxSendMessageResponse, TextFormat, InlineKeyboardButton
 from config import settings
 from utils.logger import setup_logger
 
@@ -25,73 +25,84 @@ class ProxyService:
         self.chat_user_mapping = chat_user_mapping or {}
         self.logger = setup_logger(__name__)
     
-    def telegram_to_max(self, tg_message: TelegramMessage) -> MaxMessage:
+    def _convert_telegram_keyboard_to_max(self, reply_markup: dict) -> Optional[List[dict]]:
         """
-        Конвертация сообщения Telegram в формат MAX
+        Конвертация Telegram inline клавиатуры в формат MAX
         
         Args:
-            tg_message: Сообщение из Telegram
+            reply_markup: Telegram reply_markup
         
         Returns:
-            Сообщение в формате MAX
+            Attachments для MAX API
         """
-        # Определение chat_id для MAX
-        # Приоритеты:
-        # 1. Явный маппинг из конфига
-        # 2. ID чата Telegram как строка
-        # 3. ID пользователя если это личный чат
+        if not reply_markup or "inline_keyboard" not in reply_markup:
+            return None
         
-        chat_id = str(tg_message.chat.id)
+        inline_keyboard = reply_markup["inline_keyboard"]
+        max_buttons = []
         
-        # Проверка маппинга
-        if self.chat_user_mapping:
-            chat_id = self.chat_user_mapping.get(
-                str(tg_message.chat.id),
-                chat_id
-            )
+        for row in inline_keyboard:
+            max_row = []
+            for button in row:
+                max_button = {
+                    "text": button.get("text", ""),
+                }
+                
+                # Маппинг типов кнопок
+                if "url" in button:
+                    max_button["type"] = "link"
+                    max_button["url"] = button["url"]
+                elif "callback_data" in button:
+                    max_button["type"] = "callback"
+                    max_button["payload"] = button["callback_data"]
+                else:
+                    # По умолчанию callback
+                    max_button["type"] = "callback"
+                    max_button["payload"] = button.get("text", "")
+                
+                max_row.append(max_button)
+            
+            if max_row:
+                max_buttons.append(max_row)
         
-        # Извлечение текста сообщения
-        text = tg_message.text or ""
+        if not max_buttons:
+            return None
         
-        # Если есть reply, добавляем информацию
-        if tg_message.reply_to_message:
-            text = f"Re: {text}"
-        
-        return MaxMessage(
-            chat_id=chat_id,
-            text=text,
-            reply_to_message_id=(
-                str(tg_message.reply_to_message.message_id)
-                if tg_message.reply_to_message else None
-            ),
-        )
-    
-    def max_to_telegram(self, max_response: MaxResponse, tg_chat_id: int) -> Dict[str, Any]:
-        """
-        Конвертация ответа MAX в формат для отправки в Telegram
-        
-        Args:
-            max_response: Ответ от MAX API
-            tg_chat_id: ID чата Telegram для ответа
-        
-        Returns:
-            Параметры для отправки в Telegram
-        """
-        if max_response.error:
-            return {
-                "chat_id": tg_chat_id,
-                "text": f"❌ Ошибка: {max_response.error}"
+        return [{
+            "type": "inline_keyboard",
+            "payload": {
+                "buttons": max_buttons
             }
+        }]
+    
+    def _get_max_user_id(self, tg_chat_id: int) -> Optional[int]:
+        """
+        Получение MAX user_id из маппинга по Telegram chat_id
         
-        return {
-            "chat_id": tg_chat_id,
-            "text": "✅ Сообщение отправлено",
-        }
+        Args:
+            tg_chat_id: Telegram chat ID
+        
+        Returns:
+            MAX user_id или None
+        """
+        if not self.chat_user_mapping:
+            # Если маппинга нет, используем тот же ID
+            return tg_chat_id
+        
+        max_user_id = self.chat_user_mapping.get(str(tg_chat_id))
+        if max_user_id:
+            try:
+                return int(max_user_id)
+            except ValueError:
+                self.logger.error(f"Invalid MAX user_id in mapping: {max_user_id}")
+                return None
+        
+        return None
     
     async def process_telegram_message(
         self,
         update: TelegramUpdate
-    ) -> Optional[MaxResponse]:
+    ) -> Optional[MaxSendMessageResponse]:
         """
         Обработка входящего сообщения из Telegram и отправка в MAX
         
@@ -118,13 +129,42 @@ class ProxyService:
             self.logger.debug(f"Ignoring bot message from {message.from_user.id}")
             return None
         
-        # Конвертация в формат MAX
-        max_message = self.telegram_to_max(message)
+        # Получение MAX user_id
+        max_user_id = self._get_max_user_id(message.chat.id)
+        if not max_user_id:
+            self.logger.error(f"No MAX user_id mapping for Telegram chat {message.chat.id}")
+            await self.telegram_client.send_message(
+                chat_id=message.chat.id,
+                text="❌ Ошибка: не настроен маппинг чатов для отправки в MAX"
+            )
+            return None
+        
+        # Извлечение текста
+        text = message.text or ""
+        if not text:
+            self.logger.debug("Message has no text, skipping")
+            return None
+        
+        # Конвертация inline клавиатуры если есть
+        attachments = None
+        if hasattr(message, 'reply_markup') and message.reply_markup:
+            attachments = self._convert_telegram_keyboard_to_max(message.reply_markup)
+        
+        # Определение формата текста (если есть entities, используем markdown)
+        text_format = None
+        if message.entities:
+            text_format = TextFormat.MARKDOWN
         
         # Отправка в MAX
         try:
-            response = await self.max_client.send_message(max_message)
-            self.logger.info(f"Message forwarded from Telegram chat {message.chat.id} to MAX chat {max_message.chat_id}")
+            response = await self.max_client.send_message(
+                user_id=max_user_id,
+                text=text,
+                attachments=attachments,
+                format=text_format,
+                notify=True
+            )
+            self.logger.info(f"Message forwarded from Telegram chat {message.chat.id} to MAX user {max_user_id}")
             return response
         except Exception as e:
             # Логирование ошибки
@@ -162,15 +202,3 @@ class ProxyService:
             text=text,
             reply_to_message_id=reply_to_message_id
         )
-    
-    async def sync_messages(
-        self,
-        tg_chat_id: int,
-        max_chat_id: str
-    ) -> None:
-        """
-        Синхронизация сообщений между чатами
-        
-        TODO: Реализуйте логику синхронизации при необходимости
-        """
-        pass

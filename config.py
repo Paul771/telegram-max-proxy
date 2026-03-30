@@ -11,12 +11,10 @@ class Settings(BaseSettings):
     
     # MAX Messenger API
     max_api_base_url: str = Field(
-        default="https://api.max.ru/bot",
+        default="https://platform-api.max.ru",
         description="Base URL for MAX API"
     )
     max_api_token: str = Field(..., min_length=1, description="MAX API bot token")
-    max_send_endpoint: str = Field(default="/messages/send")
-    max_receive_endpoint: str = Field(default="/updates/get")
     max_timeout: int = Field(default=30, ge=1, le=300)
     
     # Режим работы с MAX API

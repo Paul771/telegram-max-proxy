@@ -11,7 +11,7 @@ from adapters.telegram import TelegramClient
 from adapters.max import MaxClient
 from services.proxy import ProxyService
 from models.telegram import TelegramUpdate
-from models.max import MaxIncomingMessage
+from models.max import MaxUpdate
 from utils.logger import setup_logger
 from utils.constants import (
     STATUS_RUNNING,
@@ -46,10 +46,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     # Инициализация клиентов
     telegram_client = TelegramClient(bot_token=settings.telegram_bot_token)
     max_client = MaxClient(
-        base_url=settings.max_api_base_url,
         api_token=settings.max_api_token,
-        send_endpoint=settings.max_send_endpoint,
-        receive_endpoint=settings.max_receive_endpoint,
+        base_url=settings.max_api_base_url,
         timeout=settings.max_timeout
     )
     proxy_service = ProxyService(
@@ -114,20 +112,25 @@ async def max_polling_loop():
         logger.error("Cannot start polling: clients not initialized")
         return
     
-    offset = None
+    marker = None
     logger.info("Starting MAX API polling loop...")
     
     while True:
         try:
-            updates = await max_client.get_updates(offset=offset, timeout=LONG_POLLING_TIMEOUT)
+            updates_response = await max_client.get_updates(
+                limit=100,
+                timeout=LONG_POLLING_TIMEOUT,
+                marker=marker,
+                types=["message_created"]
+            )
             
-            for update in updates:
+            for update in updates_response.updates:
                 # Пересылка сообщения из MAX в Telegram
                 await forward_max_to_telegram(update, telegram_client, proxy_service)
-                
-                # Обновление offset для следующего запроса
-                if update.message_id and update.message_id.isdigit():
-                    offset = int(update.message_id) + 1
+            
+            # Обновление marker для следующего запроса
+            if updates_response.marker:
+                marker = updates_response.marker
             
         except asyncio.CancelledError:
             logger.info("Polling loop cancelled")
@@ -138,39 +141,52 @@ async def max_polling_loop():
 
 
 async def forward_max_to_telegram(
-    message: MaxIncomingMessage,
+    update: MaxUpdate,
     tg_client: TelegramClient,
     proxy: ProxyService
 ):
     """
     Пересылка сообщения из MAX в Telegram
     """
-    # Получение Telegram chat_id из маппинга или использование chat.id
+    if not update.message or not update.message.body:
+        logger.debug("Update has no message or body, skipping")
+        return
+    
+    message = update.message
+    text = message.body.text if message.body else ""
+    
+    if not text:
+        logger.debug("Message has no text, skipping")
+        return
+    
+    # Получение Telegram chat_id из маппинга
     tg_chat_id = None
     
-    if proxy.chat_user_mapping:
+    # Определяем отправителя из MAX
+    max_user_id = None
+    if message.sender:
+        max_user_id = str(message.sender.user_id)
+    elif message.recipient.user_id:
+        max_user_id = str(message.recipient.user_id)
+    
+    if proxy.chat_user_mapping and max_user_id:
         # Поиск Telegram chat_id по MAX user_id
         for tg_id, max_id in proxy.chat_user_mapping.items():
-            if max_id == message.chat.id:
+            if str(max_id) == max_user_id:
                 tg_chat_id = int(tg_id)
                 break
     
     if tg_chat_id is None:
-        # Если маппинга нет, используем chat.id как fallback
-        # (это может не работать, если ID форматы не совпадают)
-        try:
-            tg_chat_id = int(message.chat.id)
-        except ValueError:
-            logger.warning(f"Cannot convert chat_id: {message.chat.id}")
-            return
+        logger.warning(f"No Telegram chat_id mapping found for MAX user {max_user_id}")
+        return
     
     # Отправка в Telegram
     try:
         await tg_client.send_message(
             chat_id=tg_chat_id,
-            text=message.text or "",
+            text=text,
         )
-        logger.info(f"Message forwarded from MAX chat {message.chat.id} to Telegram chat {tg_chat_id}")
+        logger.info(f"Message forwarded from MAX user {max_user_id} to Telegram chat {tg_chat_id}")
     except Exception as e:
         logger.error(f"Failed to send to Telegram: {e}")
 
