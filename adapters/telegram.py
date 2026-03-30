@@ -1,6 +1,12 @@
 import httpx
 from typing import Optional, List, Dict, Any
 from models.telegram import TelegramMessage
+from utils.logger import setup_logger
+from utils.constants import (
+    TELEGRAM_API_BASE,
+    DEFAULT_HTTP_TIMEOUT,
+    LONG_POLLING_TIMEOUT
+)
 
 
 class TelegramClient:
@@ -8,7 +14,32 @@ class TelegramClient:
     
     def __init__(self, bot_token: str):
         self.bot_token = bot_token
-        self.base_url = f"https://api.telegram.org/bot{bot_token}"
+        self.base_url = f"{TELEGRAM_API_BASE}{bot_token}"
+        self.logger = setup_logger(__name__)
+        self._client: Optional[httpx.AsyncClient] = None
+    
+    async def __aenter__(self):
+        """Async context manager entry"""
+        self._client = httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT)
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit"""
+        if self._client:
+            await self._client.aclose()
+            self._client = None
+    
+    def _get_client(self) -> httpx.AsyncClient:
+        """Get or create HTTP client"""
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT)
+        return self._client
+    
+    async def close(self):
+        """Close HTTP client"""
+        if self._client:
+            await self._client.aclose()
+            self._client = None
     
     async def send_message(
         self,
@@ -42,14 +73,19 @@ class TelegramClient:
             payload["reply_to_message_id"] = reply_to_message_id
         payload.update(kwargs)
         
-        async with httpx.AsyncClient() as client:
+        try:
+            client = self._get_client()
             response = await client.post(
                 f"{self.base_url}/sendMessage",
                 json=payload,
-                timeout=30.0
+                timeout=DEFAULT_HTTP_TIMEOUT
             )
             response.raise_for_status()
+            self.logger.debug(f"Message sent to chat {chat_id}")
             return response.json()
+        except httpx.HTTPError as e:
+            self.logger.error(f"Failed to send message to {chat_id}: {e}")
+            raise
     
     async def get_updates(
         self,
@@ -74,7 +110,8 @@ class TelegramClient:
         if allowed_updates:
             params["allowed_updates"] = allowed_updates
         
-        async with httpx.AsyncClient() as client:
+        try:
+            client = self._get_client()
             response = await client.get(
                 f"{self.base_url}/getUpdates",
                 params=params,
@@ -82,7 +119,12 @@ class TelegramClient:
             )
             response.raise_for_status()
             result = response.json()
-            return result.get("result", [])
+            updates = result.get("result", [])
+            self.logger.debug(f"Received {len(updates)} updates")
+            return updates
+        except httpx.HTTPError as e:
+            self.logger.error(f"Failed to get updates: {e}")
+            raise
     
     async def set_webhook(
         self,
@@ -113,35 +155,51 @@ class TelegramClient:
         if allowed_updates:
             payload["allowed_updates"] = allowed_updates
         
-        async with httpx.AsyncClient() as client:
+        try:
+            client = self._get_client()
             response = await client.post(
                 f"{self.base_url}/setWebhook",
                 json=payload,
-                timeout=30.0
+                timeout=DEFAULT_HTTP_TIMEOUT
             )
             response.raise_for_status()
+            self.logger.info(f"Webhook set to {url}")
             return response.json()
+        except httpx.HTTPError as e:
+            self.logger.error(f"Failed to set webhook: {e}")
+            raise
     
     async def delete_webhook(self) -> Dict[str, Any]:
         """Удаление webhook"""
-        async with httpx.AsyncClient() as client:
+        try:
+            client = self._get_client()
             response = await client.post(
                 f"{self.base_url}/deleteWebhook",
-                timeout=30.0
+                timeout=DEFAULT_HTTP_TIMEOUT
             )
             response.raise_for_status()
+            self.logger.info("Webhook deleted")
             return response.json()
+        except httpx.HTTPError as e:
+            self.logger.error(f"Failed to delete webhook: {e}")
+            raise
     
     async def get_me(self) -> Dict[str, Any]:
         """Получение информации о боте"""
-        async with httpx.AsyncClient() as client:
+        try:
+            client = self._get_client()
             response = await client.get(
                 f"{self.base_url}/getMe",
-                timeout=30.0
+                timeout=DEFAULT_HTTP_TIMEOUT
             )
             response.raise_for_status()
             result = response.json()
-            return result.get("result", {})
+            bot_info = result.get("result", {})
+            self.logger.debug(f"Bot info retrieved: {bot_info.get('username', 'unknown')}")
+            return bot_info
+        except httpx.HTTPError as e:
+            self.logger.error(f"Failed to get bot info: {e}")
+            raise
     
     async def answer_callback_query(
         self,
@@ -158,11 +216,15 @@ class TelegramClient:
         if text:
             payload["text"] = text
         
-        async with httpx.AsyncClient() as client:
+        try:
+            client = self._get_client()
             response = await client.post(
                 f"{self.base_url}/answerCallbackQuery",
                 json=payload,
-                timeout=30.0
+                timeout=DEFAULT_HTTP_TIMEOUT
             )
             response.raise_for_status()
             return response.json()
+        except httpx.HTTPError as e:
+            self.logger.error(f"Failed to answer callback query: {e}")
+            raise

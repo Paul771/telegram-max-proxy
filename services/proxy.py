@@ -4,6 +4,7 @@ from adapters.max import MaxClient
 from models.telegram import TelegramMessage, TelegramUpdate
 from models.max import MaxMessage, MaxResponse
 from config import settings
+from utils.logger import setup_logger
 
 
 class ProxyService:
@@ -22,6 +23,7 @@ class ProxyService:
         self.telegram_client = telegram_client
         self.max_client = max_client
         self.chat_user_mapping = chat_user_mapping or {}
+        self.logger = setup_logger(__name__)
     
     def telegram_to_max(self, tg_message: TelegramMessage) -> MaxMessage:
         """
@@ -108,10 +110,12 @@ class ProxyService:
         )
         
         if not message:
+            self.logger.debug("No message in update, skipping")
             return None
         
         # Игнорирование сообщений от ботов (опционально)
         if message.from_user and message.from_user.is_bot:
+            self.logger.debug(f"Ignoring bot message from {message.from_user.id}")
             return None
         
         # Конвертация в формат MAX
@@ -120,16 +124,20 @@ class ProxyService:
         # Отправка в MAX
         try:
             response = await self.max_client.send_message(max_message)
+            self.logger.info(f"Message forwarded from Telegram chat {message.chat.id} to MAX chat {max_message.chat_id}")
             return response
         except Exception as e:
-            # Логирование ошибки (в реальном приложении используйте logger)
-            print(f"Error sending to MAX: {e}")
+            # Логирование ошибки
+            self.logger.error(f"Error sending to MAX: {e}")
             
             # Уведомление об ошибке в Telegram
-            await self.telegram_client.send_message(
-                chat_id=message.chat.id,
-                text=f"❌ Ошибка отправки в MAX: {str(e)}"
-            )
+            try:
+                await self.telegram_client.send_message(
+                    chat_id=message.chat.id,
+                    text=f"❌ Ошибка отправки в MAX: {str(e)}"
+                )
+            except Exception as notify_error:
+                self.logger.error(f"Failed to send error notification: {notify_error}")
             return None
     
     async def forward_to_telegram(

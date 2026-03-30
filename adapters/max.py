@@ -2,6 +2,13 @@ import httpx
 import asyncio
 from typing import Optional, List, Dict, Any, AsyncGenerator
 from models.max import MaxMessage, MaxResponse, MaxIncomingMessage, MaxUser, MaxChat
+from utils.logger import setup_logger
+from utils.constants import (
+    DEFAULT_HTTP_TIMEOUT,
+    LONG_POLLING_TIMEOUT,
+    HEALTH_CHECK_TIMEOUT,
+    POLLING_ERROR_DELAY
+)
 
 
 class MaxClient:
@@ -35,6 +42,31 @@ class MaxClient:
         self.send_endpoint = send_endpoint
         self.receive_endpoint = receive_endpoint
         self.timeout = timeout
+        self.logger = setup_logger(__name__)
+        self._client: Optional[httpx.AsyncClient] = None
+    
+    async def __aenter__(self):
+        """Async context manager entry"""
+        self._client = httpx.AsyncClient(timeout=self.timeout)
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit"""
+        if self._client:
+            await self._client.aclose()
+            self._client = None
+    
+    def _get_client(self) -> httpx.AsyncClient:
+        """Get or create HTTP client"""
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=self.timeout)
+        return self._client
+    
+    async def close(self):
+        """Close HTTP client"""
+        if self._client:
+            await self._client.aclose()
+            self._client = None
     
     def _get_headers(self) -> Dict[str, str]:
         """
@@ -80,7 +112,8 @@ class MaxClient:
         if message.extra:
             payload.update(message.extra)
         
-        async with httpx.AsyncClient() as client:
+        try:
+            client = self._get_client()
             response = await client.post(
                 self._get_url(self.send_endpoint),
                 json=payload,
@@ -90,6 +123,8 @@ class MaxClient:
             response.raise_for_status()
             data = response.json()
             
+            self.logger.debug(f"Message sent to MAX chat {message.chat_id}")
+            
             return MaxResponse(
                 success=data.get("ok", data.get("success", True)),
                 message_id=str(data.get("message_id", "")),
@@ -98,6 +133,9 @@ class MaxClient:
                 error=data.get("description") or data.get("error"),
                 data=data
             )
+        except httpx.HTTPError as e:
+            self.logger.error(f"Failed to send message to MAX: {e}")
+            raise
     
     async def get_updates(
         self,
@@ -125,7 +163,8 @@ class MaxClient:
         if offset is not None:
             params["offset"] = offset
         
-        async with httpx.AsyncClient() as client:
+        try:
+            client = self._get_client()
             response = await client.get(
                 self._get_url(self.receive_endpoint),
                 params=params,
@@ -160,7 +199,11 @@ class MaxClient:
                     type=update_obj.get("type", "text"),
                 ))
             
+            self.logger.debug(f"Received {len(messages)} updates from MAX")
             return messages
+        except httpx.HTTPError as e:
+            self.logger.error(f"Failed to get updates from MAX: {e}")
+            raise
     
     async def get_updates_stream(
         self,
@@ -175,7 +218,7 @@ class MaxClient:
         
         while True:
             try:
-                updates = await self.get_updates(offset=current_offset, timeout=60)
+                updates = await self.get_updates(offset=current_offset, timeout=LONG_POLLING_TIMEOUT)
                 
                 for update in updates:
                     yield update
@@ -185,8 +228,8 @@ class MaxClient:
                     await asyncio.sleep(1)
                     
             except Exception as e:
-                print(f"Error getting updates: {e}")
-                await asyncio.sleep(5)
+                self.logger.error(f"Error getting updates: {e}")
+                await asyncio.sleep(POLLING_ERROR_DELAY)
     
     async def set_webhook(
         self,
@@ -207,7 +250,8 @@ class MaxClient:
         if secret_token:
             payload["secret_token"] = secret_token
         
-        async with httpx.AsyncClient() as client:
+        try:
+            client = self._get_client()
             response = await client.post(
                 self._get_url("/webhook/set"),
                 json=payload,
@@ -215,18 +259,27 @@ class MaxClient:
                 timeout=self.timeout
             )
             response.raise_for_status()
+            self.logger.info(f"MAX webhook set to {url}")
             return response.json()
+        except httpx.HTTPError as e:
+            self.logger.error(f"Failed to set MAX webhook: {e}")
+            raise
     
     async def delete_webhook(self) -> Dict[str, Any]:
         """Удаление webhook"""
-        async with httpx.AsyncClient() as client:
+        try:
+            client = self._get_client()
             response = await client.post(
                 self._get_url("/webhook/delete"),
                 headers=self._get_headers(),
                 timeout=self.timeout
             )
             response.raise_for_status()
+            self.logger.info("MAX webhook deleted")
             return response.json()
+        except httpx.HTTPError as e:
+            self.logger.error(f"Failed to delete MAX webhook: {e}")
+            raise
     
     async def get_me(self) -> Dict[str, Any]:
         """
@@ -235,7 +288,8 @@ class MaxClient:
         Returns:
             Информация о боте MAX
         """
-        async with httpx.AsyncClient() as client:
+        try:
+            client = self._get_client()
             response = await client.get(
                 self._get_url("/me"),
                 headers=self._get_headers(),
@@ -243,17 +297,23 @@ class MaxClient:
             )
             response.raise_for_status()
             result = response.json()
-            return result.get("result", {})
+            bot_info = result.get("result", {})
+            self.logger.debug("MAX bot info retrieved")
+            return bot_info
+        except httpx.HTTPError as e:
+            self.logger.error(f"Failed to get MAX bot info: {e}")
+            raise
     
     async def health_check(self) -> bool:
         """Проверка доступности MAX API"""
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    self._get_url("/me"),
-                    headers=self._get_headers(),
-                    timeout=10
-                )
-                return response.status_code == 200
-        except Exception:
+            client = self._get_client()
+            response = await client.get(
+                self._get_url("/me"),
+                headers=self._get_headers(),
+                timeout=HEALTH_CHECK_TIMEOUT
+            )
+            return response.status_code == 200
+        except Exception as e:
+            self.logger.warning(f"MAX API health check failed: {e}")
             return False
