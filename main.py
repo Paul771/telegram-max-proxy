@@ -41,7 +41,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     """Инициализация и очистка ресурсов приложения"""
     global telegram_client, max_client, proxy_service, polling_task
 
-    logger.info("Starting Telegram → MAX Messenger Proxy")
+    logger.info("Starting Telegram -> MAX Messenger Proxy")
 
     # Инициализация клиентов
     telegram_client = TelegramClient(bot_token=settings.telegram_bot_token)
@@ -192,7 +192,7 @@ async def forward_max_to_telegram(
 
 
 app = FastAPI(
-    title="Telegram → MAX Messenger Proxy",
+    title="Telegram to MAX Messenger Proxy",
     description="Прокси-сервис для передачи сообщений между Telegram Bot API и MAX Messenger API",
     version="1.0.0",
     lifespan=lifespan
@@ -203,7 +203,7 @@ app = FastAPI(
 async def root() -> Dict[str, str]:
     """Информация о сервисе"""
     return {
-        "service": "Telegram → MAX Messenger Proxy",
+        "service": "Telegram to MAX Messenger Proxy",
         "version": "1.0.0",
         "status": STATUS_RUNNING
     }
@@ -256,8 +256,8 @@ async def telegram_webhook(update: TelegramUpdate) -> JSONResponse:
             return JSONResponse({
                 "status": "processed",
                 "max_response": {
-                    "success": response.success,
-                    "message_id": response.message_id
+                    "success": True,
+                    "message": response.message.model_dump() if response.message else None
                 }
             })
         

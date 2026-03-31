@@ -4,7 +4,15 @@ from .telegram import (
     TelegramChat,
     TelegramUpdate,
 )
-from .max import MaxMessage, MaxUser, MaxChat, MaxResponse
+from .max import (
+    MaxMessage,
+    MaxUser,
+    MaxChat,
+    MaxRecipient,
+    MaxSendMessageResponse,
+    MaxUpdatesResponse,
+    MaxUpdate,
+)
 
 __all__ = [
     "TelegramMessage",
@@ -14,5 +22,8 @@ __all__ = [
     "MaxMessage",
     "MaxUser",
     "MaxChat",
-    "MaxResponse",
+    "MaxRecipient",
+    "MaxSendMessageResponse",
+    "MaxUpdatesResponse",
+    "MaxUpdate",
 ]
