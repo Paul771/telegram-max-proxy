@@ -13,6 +13,7 @@ from services.proxy import ProxyService
 from models.telegram import TelegramUpdate
 from models.max import MaxUpdate
 from utils.logger import setup_logger
+from utils.proxy_helper import create_proxy_url, validate_mtproto_secret
 from utils.constants import (
     STATUS_RUNNING,
     STATUS_HEALTHY,
@@ -43,8 +44,26 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
 
     logger.info("Starting Telegram -> MAX Messenger Proxy")
 
+    # Определение прокси для Telegram
+    # Приоритет: MTProto > SOCKS > HTTP
+    telegram_proxy = create_proxy_url(
+        http_proxy=settings.http_proxy,
+        socks_proxy=settings.socks_proxy,
+        mtproto_host=settings.mtproto_proxy_host,
+        mtproto_port=settings.mtproto_proxy_port,
+        mtproto_secret=settings.mtproto_proxy_secret
+    )
+    
+    if telegram_proxy:
+        logger.info(f"Using proxy for Telegram API: {telegram_proxy}")
+    else:
+        logger.warning("No proxy configured - Telegram API may be blocked")
+
     # Инициализация клиентов
-    telegram_client = TelegramClient(bot_token=settings.telegram_bot_token)
+    telegram_client = TelegramClient(
+        bot_token=settings.telegram_bot_token,
+        proxy_url=telegram_proxy
+    )
     max_client = MaxClient(
         api_token=settings.max_api_token,
         base_url=settings.max_api_base_url,

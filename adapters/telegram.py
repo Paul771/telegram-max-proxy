@@ -12,15 +12,20 @@ from utils.constants import (
 class TelegramClient:
     """Клиент для работы с Telegram Bot API"""
     
-    def __init__(self, bot_token: str):
+    def __init__(self, bot_token: str, proxy_url: Optional[str] = None):
         self.bot_token = bot_token
         self.base_url = f"{TELEGRAM_API_BASE}{bot_token}"
+        self.proxy_url = proxy_url
         self.logger = setup_logger(__name__)
         self._client: Optional[httpx.AsyncClient] = None
     
     async def __aenter__(self):
         """Async context manager entry"""
-        self._client = httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT)
+        client_kwargs = {"timeout": DEFAULT_HTTP_TIMEOUT}
+        if self.proxy_url:
+            client_kwargs["proxy"] = self.proxy_url
+            self.logger.info(f"Using proxy: {self.proxy_url}")
+        self._client = httpx.AsyncClient(**client_kwargs)
         return self
     
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -32,7 +37,11 @@ class TelegramClient:
     def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client"""
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT)
+            client_kwargs = {"timeout": DEFAULT_HTTP_TIMEOUT}
+            if self.proxy_url:
+                client_kwargs["proxy"] = self.proxy_url
+                self.logger.info(f"Using proxy: {self.proxy_url}")
+            self._client = httpx.AsyncClient(**client_kwargs)
         return self._client
     
     async def close(self):
