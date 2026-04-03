@@ -9,6 +9,26 @@ class Settings(BaseSettings):
     telegram_bot_token: str = Field(..., min_length=1, description="Telegram bot token from @BotFather")
     telegram_webhook_path: str = Field(default="/webhook/telegram", pattern="^/.*")
     
+    # Telegram Client Mode: 'bot_api' or 'telethon'
+    telegram_mode: Literal["bot_api", "telethon"] = Field(
+        default="bot_api",
+        description="Mode: 'bot_api' (standard) or 'telethon' (MTProto support)"
+    )
+    
+    # Telethon settings (required if telegram_mode='telethon')
+    telegram_api_id: Optional[int] = Field(
+        default=None,
+        description="Telegram API ID from https://my.telegram.org"
+    )
+    telegram_api_hash: Optional[str] = Field(
+        default=None,
+        description="Telegram API Hash from https://my.telegram.org"
+    )
+    telegram_session_string: Optional[str] = Field(
+        default=None,
+        description="Telethon session string (optional, for reusing sessions)"
+    )
+    
     # MAX Messenger API
     max_api_base_url: str = Field(
         default="https://platform-api.max.ru",

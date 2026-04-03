@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Dict, Any
+from typing import AsyncGenerator, Dict, Any, Union
 import asyncio
 import logging
 
@@ -8,6 +8,8 @@ from fastapi.responses import JSONResponse
 
 from config import settings
 from adapters.telegram import TelegramClient
+from adapters.telegram_telethon import TelethonAdapter
+from adapters.telegram_factory import create_telegram_client, prepare_mtproto_proxy
 from adapters.max import MaxClient
 from services.proxy import ProxyService
 from models.telegram import TelegramUpdate
@@ -31,7 +33,7 @@ from utils.constants import (
 logger = setup_logger(__name__, settings.log_level)
 
 # Глобальные клиенты
-telegram_client: TelegramClient | None = None
+telegram_client: Union[TelegramClient, TelethonAdapter, None] = None
 max_client: MaxClient | None = None
 proxy_service: ProxyService | None = None
 polling_task: asyncio.Task | None = None
@@ -43,27 +45,61 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     global telegram_client, max_client, proxy_service, polling_task
 
     logger.info("Starting Telegram -> MAX Messenger Proxy")
+    logger.info(f"Telegram mode: {settings.telegram_mode}")
 
-    # Определение прокси для Telegram
-    # Приоритет: MTProto > SOCKS > HTTP
-    telegram_proxy = create_proxy_url(
-        http_proxy=settings.http_proxy,
-        socks_proxy=settings.socks_proxy,
-        mtproto_host=settings.mtproto_proxy_host,
-        mtproto_port=settings.mtproto_proxy_port,
-        mtproto_secret=settings.mtproto_proxy_secret
-    )
+    # Инициализация Telegram клиента в зависимости от режима
+    if settings.telegram_mode == "telethon":
+        # Режим Telethon с MTProto поддержкой
+        logger.info("Using Telethon mode (MTProto support)")
+        
+        # Подготовка MTProto прокси
+        mtproto_proxy = None
+        if settings.mtproto_proxy_host and settings.mtproto_proxy_port and settings.mtproto_proxy_secret:
+            mtproto_proxy = prepare_mtproto_proxy(
+                host=settings.mtproto_proxy_host,
+                port=settings.mtproto_proxy_port,
+                secret=settings.mtproto_proxy_secret
+            )
+            logger.info(f"MTProto proxy configured: {settings.mtproto_proxy_host}:{settings.mtproto_proxy_port}")
+        
+        telegram_client = create_telegram_client(
+            mode="telethon",
+            bot_token=settings.telegram_bot_token,
+            api_id=settings.telegram_api_id,
+            api_hash=settings.telegram_api_hash,
+            session_string=settings.telegram_session_string,
+            mtproto_proxy=mtproto_proxy
+        )
+        
+        # Запуск Telethon клиента
+        session_string = await telegram_client.start()
+        logger.info("Telethon client started successfully")
+        if not settings.telegram_session_string:
+            logger.info(f"Save this session string to .env: TELEGRAM_SESSION_STRING={session_string}")
     
-    if telegram_proxy:
-        logger.info(f"Using proxy for Telegram API: {telegram_proxy}")
     else:
-        logger.warning("No proxy configured - Telegram API may be blocked")
-
-    # Инициализация клиентов
-    telegram_client = TelegramClient(
-        bot_token=settings.telegram_bot_token,
-        proxy_url=telegram_proxy
-    )
+        # Стандартный режим Bot API
+        logger.info("Using standard Bot API mode")
+        
+        # Определение прокси для Bot API (HTTP/SOCKS5)
+        telegram_proxy = create_proxy_url(
+            http_proxy=settings.http_proxy,
+            socks_proxy=settings.socks_proxy,
+            mtproto_host=None,  # MTProto не работает с Bot API
+            mtproto_port=None,
+            mtproto_secret=None
+        )
+        
+        if telegram_proxy:
+            logger.info(f"Using proxy for Bot API: {telegram_proxy}")
+        else:
+            logger.warning("No proxy configured - Telegram API may be blocked")
+        
+        telegram_client = create_telegram_client(
+            mode="bot_api",
+            bot_token=settings.telegram_bot_token,
+            proxy_url=telegram_proxy
+        )
     max_client = MaxClient(
         api_token=settings.max_api_token,
         base_url=settings.max_api_base_url,
@@ -107,9 +143,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         except asyncio.CancelledError:
             logger.info("Polling task stopped")
 
-    # Закрытие HTTP клиентов
+    # Закрытие клиентов
     if telegram_client:
-        await telegram_client.close()
+        if isinstance(telegram_client, TelethonAdapter):
+            await telegram_client.stop()
+        else:
+            await telegram_client.close()
     if max_client:
         await max_client.close()
 
